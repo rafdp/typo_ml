@@ -1,0 +1,10 @@
+{
+    "experiment": "1",
+    "source_lang": "lv",
+    "target_lang": "ru",
+    "eval%": 10,
+    "predict%": 10,
+    "vocab_size": 5000,
+    "data_path": "data/",
+    "rebuild_vocab": false
+}
