@@ -6,5 +6,5 @@
     "predict%": 10,
     "vocab_size": 5000,
     "data_path": "data/",
-    "rebuild_vocab": false
+    "rebuild_vocab": true 
 }
