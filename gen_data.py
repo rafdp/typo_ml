@@ -6,7 +6,7 @@ import numpy as np
 import os
 import operator
 import string
-
+import random
 CheckHparamsMandatory("source_lang")
 CheckHparamsMandatory("target_lang")
 CheckHparamsMandatory("data_path")
@@ -37,6 +37,11 @@ source_corpus = np.array([unit.getNodeText(unit.getlanguageNode(source_lang))
                           for unit in units])
 target_corpus = np.array([unit.getNodeText(unit.getlanguageNode(target_lang)) 
                           for unit in units])
+for i in reversed(range(len(source_corpus))):
+    if len(source_corpus[i]) < 1 or len(target_corpus[i]) < 1:
+        del source_corpus[i]
+        del target_corpus[i]
+        i -= 1
 
 removal_rate = 0.05
 if "char_removal%" in hparams:
@@ -70,11 +75,11 @@ def Normalize(corpus, rate):
     
     for s in corpus:
         s = s.replace(delete_chars, '')
-    return (corpus, cut, len(cum_sum))
+    return (corpus, cut, len(cum_sum), sorted_chars[:cut])
 
-source_corpus, source_cut, source_count = Normalize(source_corpus, removal_rate)
+source_corpus, source_cut, source_count, source_alph = Normalize(source_corpus, removal_rate)
 print("    input: removed %d of %d characters" % (source_count - source_cut, source_count))
-target_corpus, target_cut, target_count = Normalize(target_corpus, removal_rate)
+target_corpus, target_cut, target_count, _ = Normalize(target_corpus, removal_rate)
 print("    output: removed %d of %d characters" % (target_count - target_cut, source_count))
 
 print("  shuffling")
@@ -120,19 +125,11 @@ print("  output:")
 output_vocab_path = exp_path + '(' + source_lang + ')' + \
                              target_lang + '_vocab.txt'
 output_encoder = GenerateVocab(output_vocab_path, target_corpus)
-
-
 ######################
-######### Encoding
-######################
+######### Typo work
+#####################
 
-print("Encoding:")
-encoded_source = np.array([input_encoder.encode(utt) 
-                           for utt in source_corpus])
-
-encoded_target = np.array([output_encoder.encode(utt) 
-                           for utt in target_corpus])
-sz = encoded_source.size
+sz = len(source_corpus)
 eval_pc = 0.1
 if "eval%" in hparams: 
     eval_pc = hparams["eval%"] / 100
@@ -145,6 +142,178 @@ predict_sz = int(sz*predict_pc)
 train_sz = sz - eval_sz - predict_sz
 if train_sz < 0:
     raise ValueError("Invalid sizes for eval and predict")
+
+def ApplyTypoInjectorByIndex(start_idx, end_idx, func, prob):
+    for i in range(start_idx, end_idx):
+        if len(source_corpus[i]) < 4:
+            continue
+        char_idx = 0
+        rand_val = random.random()
+        if rand_val > prob:
+            continue
+        indices = []
+        while char_idx < len(source_corpus[i]):
+            while char_idx < len(source_corpus[i]) and \
+                  source_corpus[i][char_idx] == ' ': 
+                char_idx += 1
+            if char_idx >= len(source_corpus[i]):
+                break
+            next_char_idx = char_idx + 1
+            while next_char_idx < len(source_corpus[i]) and \
+                  source_corpus[i][next_char_idx] != ' ': 
+                next_char_idx += 1
+            if next_char_idx - char_idx < 4:
+                char_idx = next_char_idx + 1
+                continue
+            indices.append([char_idx, next_char_idx])
+            char_idx = next_char_idx + 1
+        if len(indices) == 0:
+            indices.append([0, len(source_corpus[i])])
+        manip = indices[random.randint(0, len(indices)-1)]
+        func(i, manip[0], manip[1])
+
+def ApplyTypoInjectorPhrase(start_idx, end_idx, func, prob):
+    for i in range(start_idx, end_idx):
+        rand_val = random.random()
+        if rand_val < prob:
+            func(i, prob)
+
+def InjectGlue(i, prob):
+    print('  injecting glue:')
+    print('    %s' % source_corpus[i])
+    indices = []
+    for j in range(len(source_corpus[i])):
+        if source_corpus[i][j] == ' ':
+            indices.append(j)
+    random.shuffle(indices) 
+    rand_val = 1
+    indices_new = []
+    for j in range(len(indices)):
+        if rand_val < 1 - prob:
+            break
+        indices_new.append(indices[j])
+        rand_val *= random.random()
+    indices_new = sorted(indices_new)
+    for j in reversed(range(len(indices_new))):
+        source_corpus[i] = source_corpus[i][:indices_new[j]] + \
+                           source_corpus[i][indices_new[j]+1:] 
+    print('    %s' % source_corpus[i])
+
+def InjectSwap(i, char_idx, next_char_idx):
+    print('  injecting swap:')
+    print('    %s' % source_corpus[i][char_idx:next_char_idx])
+    idx = random.randint(0, next_char_idx - char_idx - 2)
+    c = source_corpus[i][char_idx + idx]
+    source_corpus[i] = source_corpus[i][:char_idx + idx] + \
+                       source_corpus[i][char_idx+idx+1] + \
+                       source_corpus[i][char_idx + idx+1:] 
+    source_corpus[i] = source_corpus[i][:char_idx + idx+1] + \
+                       c + \
+                       source_corpus[i][char_idx + idx+2:] 
+    print('    %s' % source_corpus[i][char_idx:next_char_idx])
+    return 0
+
+def InjectRandom(i, char_idx, next_char_idx):
+    print('  injecting random:')
+    print('    %s' % source_corpus[i][char_idx:next_char_idx])
+    idx = random.randint(0, next_char_idx - char_idx)
+    letter = source_alph[random.randint(0, len(source_alph) - 1)][0]
+    source_corpus[i] = source_corpus[i][:char_idx] + letter + \
+                       source_corpus[i][char_idx+1:]
+    print('    %s' % source_corpus[i][char_idx:next_char_idx])
+    return 0
+ 
+def InjectInsert(i, char_idx, next_char_idx):
+    print('  injecting insert:')
+    print('    %s' % source_corpus[i][char_idx:next_char_idx])
+    idx = random.randint(0, next_char_idx - char_idx)
+    letter = source_alph[random.randint(0, len(source_alph)-1)][0]
+    source_corpus[i] = source_corpus[i][:char_idx+idx] + letter + \
+                       source_corpus[i][char_idx+idx:]
+    print('    %s' % source_corpus[i][char_idx:next_char_idx+1])
+    return 1
+   
+def InjectSplit(i, char_idx, next_char_idx):
+    print('  injecting split:')
+    print('    %s' % source_corpus[i][char_idx:next_char_idx])
+    idx = random.randint(1, next_char_idx - char_idx-1)
+    source_corpus[i] = source_corpus[i][:char_idx+idx] + ' ' + \
+                       source_corpus[i][char_idx+idx:]
+    print('    %s' % source_corpus[i][char_idx:next_char_idx + 1])
+    return 1
+
+def InjectDelete(i, char_idx, next_char_idx):
+    print('  injecting delete:')
+    print('    %s' % source_corpus[i][char_idx:next_char_idx])
+    idx = random.randint(0, next_char_idx - char_idx)
+    source_corpus[i] = source_corpus[i][:char_idx+idx] + \
+                       source_corpus[i][char_idx+idx + 1:]
+    print('    %s' % source_corpus[i][char_idx:next_char_idx-1])
+    return -1
+def InjectDouble(i, char_idx, next_char_idx):
+    print('  injecting double:')
+    print('    %s' % source_corpus[i][char_idx:next_char_idx])
+    idx = random.randint(0, next_char_idx - char_idx - 1)
+    source_corpus[i] = source_corpus[i][:char_idx+idx] + \
+                       source_corpus[i][char_idx + idx] + \
+                       source_corpus[i][char_idx+idx:]
+    print('    %s' % source_corpus[i][char_idx:next_char_idx+1])
+    return 1
+            
+print("Injecting typos")
+typo_indices = {"eval": [train_sz, train_sz + eval_sz],
+                "predict": [train_sz + eval_sz, train_sz + eval_sz + predict_sz]}
+injectFuncs = {"split":  InjectSplit,
+               "swap":   InjectSwap,
+               "random": InjectRandom,
+               "delete": InjectDelete,
+               "insert": InjectInsert,
+               "double": InjectDouble}
+
+for typo in hparams['inject_typos']:
+    print('  %s:' % typo)
+    if typo == "glue":
+        for stage in hparams['inject_typos'][typo]:
+            ApplyTypoInjectorPhrase(
+                 typo_indices[stage][0],
+                 typo_indices[stage][1],
+                 InjectGlue,
+                 hparams['inject_typos'][typo][stage]/100)
+    elif typo in injectFuncs:
+        for stage in hparams['inject_typos'][typo]:
+            ApplyTypoInjectorByIndex(
+                 typo_indices[stage][0],
+                 typo_indices[stage][1],
+                 injectFuncs[typo],
+                 hparams['inject_typos'][typo][stage]/100)
+    else:
+        raise ValueError("Invalid typo type. Very funny. (%s)" % typo) 
+
+######################
+######### Encoding
+######################
+
+print("Encoding:")
+
+max_seq_len = 200
+if "max_seq_len" in hparams:
+    max_seq_len = hparams['max_seq_len']
+encoded_source = np.zeros((sz, max_seq_len), dtype = int)
+for i in range(sz):
+    encoded = input_encoder.encode(source_corpus[i])
+    if len(encoded) > max_seq_len:
+        raise BaseException("max_seq_len must be bigger than utterance length")
+    for x in range(len(encoded)):
+        encoded_source[i][x] = encoded[x]
+
+encoded_target = np.zeros((sz, max_seq_len), dtype = int)
+for i in range(sz):
+    encoded = output_encoder.encode(target_corpus[i])
+    if len(encoded) > max_seq_len:
+        raise BaseException("max_seq_len must be bigger than utterance length")
+    for x in range(len(encoded)):
+        encoded_target[i][x] = encoded[x]
+
 
 print("  train %d (%.1f %%)" % (train_sz, train_sz / sz*100))
 train_source   = encoded_source[ : train_sz]
