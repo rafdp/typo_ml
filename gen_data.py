@@ -12,6 +12,8 @@ CheckHparamsMandatory("target_lang")
 CheckHparamsMandatory("data_path")
 CheckHparamsMandatory("vocab_size")
 CheckHparamsMandatory("experiment")
+CheckHparamsMandatory("input_encoder")
+CheckHparamsMandatory("evaluations")
 
 experiment = hparams["experiment"]
 
@@ -98,7 +100,7 @@ print("  output: '%s'" % target_corpus[0])
 
 ######### Input
 
-def GenerateVocab(path, corpus):
+def GenerateVocab(path, corpus, char):
 
     if os.path.isfile(path) and \
        ("rebuild_vocab" not in hparams or not hparams["rebuild_vocab"]):
@@ -108,7 +110,8 @@ def GenerateVocab(path, corpus):
         print("    building")
         encoder = te.SubwordTextEncoder.\
                         build_from_generator(corpus,
-                                   target_size=hparams['vocab_size'])
+                                   target_vocab_size=hparams['vocab_size'],
+                                   max_subtoken_length=(1 if char else None))
         print("    storing")
         encoder.store_to_file(path)
         return encoder
@@ -116,34 +119,28 @@ def GenerateVocab(path, corpus):
 
 print("Building encoders:")
 
+char = False
+if hparams['input_encoder'] == 'char':
+    char = True
+elif hparams['input_encoder'] != 'wordpiece':
+    raise ValueError('Invalid input encoder (%s)' % hparams['input_encoder'])
+
 print("  input:")
 input_vocab_path = exp_path + source_lang + \
-                            '(' + target_lang + ')' + '_vocab.txt'
-input_encoder = GenerateVocab(input_vocab_path, source_corpus)
+                         '(' + target_lang + ')' + '_vocab_' + hparams['input_encoder'] + '.txt'
+
+input_encoder = GenerateVocab(input_vocab_path, source_corpus, char)
 
 print("  output:")
 output_vocab_path = exp_path + '(' + source_lang + ')' + \
                              target_lang + '_vocab.txt'
-output_encoder = GenerateVocab(output_vocab_path, target_corpus)
+output_encoder = GenerateVocab(output_vocab_path, target_corpus, False)
 ######################
 ######### Typo work
 #####################
 
-sz = len(source_corpus)
-eval_pc = 0.1
-if "eval%" in hparams: 
-    eval_pc = hparams["eval%"] / 100
-eval_sz = int(sz * eval_pc)
-
-predict_pc = 0.1
-if "predict%" in hparams: 
-    predict_pc = hparams["predict%"] / 100
-predict_sz = int(sz*predict_pc)
-train_sz = sz - eval_sz - predict_sz
-if train_sz < 0:
-    raise ValueError("Invalid sizes for eval and predict")
-
 def ApplyTypoInjectorByIndex(start_idx, end_idx, func, prob):
+    injections = 0
     for i in range(start_idx, end_idx):
         if len(source_corpus[i]) < 4:
             continue
@@ -171,16 +168,19 @@ def ApplyTypoInjectorByIndex(start_idx, end_idx, func, prob):
             indices.append([0, len(source_corpus[i])])
         manip = indices[random.randint(0, len(indices)-1)]
         func(i, manip[0], manip[1])
+        injections += 1
+    print("    %d injections (%.1f %%)" % (injections, injections * 1.0 / (end_idx - start_idx) * 100.0))
 
 def ApplyTypoInjectorPhrase(start_idx, end_idx, func, prob):
+    injections = 0
     for i in range(start_idx, end_idx):
         rand_val = random.random()
         if rand_val < prob:
             func(i, prob)
+            injections += 1
+    print("    %d injections (%.1f %%)" % (injections, injections * 1.0 / (end_idx - start_idx) * 100.0))
 
 def InjectGlue(i, prob):
-    print('  injecting glue:')
-    print('    %s' % source_corpus[i])
     indices = []
     for j in range(len(source_corpus[i])):
         if source_corpus[i][j] == ' ':
@@ -197,11 +197,8 @@ def InjectGlue(i, prob):
     for j in reversed(range(len(indices_new))):
         source_corpus[i] = source_corpus[i][:indices_new[j]] + \
                            source_corpus[i][indices_new[j]+1:] 
-    print('    %s' % source_corpus[i])
 
 def InjectSwap(i, char_idx, next_char_idx):
-    print('  injecting swap:')
-    print('    %s' % source_corpus[i][char_idx:next_char_idx])
     idx = random.randint(0, next_char_idx - char_idx - 2)
     c = source_corpus[i][char_idx + idx]
     source_corpus[i] = source_corpus[i][:char_idx + idx] + \
@@ -210,32 +207,23 @@ def InjectSwap(i, char_idx, next_char_idx):
     source_corpus[i] = source_corpus[i][:char_idx + idx+1] + \
                        c + \
                        source_corpus[i][char_idx + idx+2:] 
-    print('    %s' % source_corpus[i][char_idx:next_char_idx])
     return 0
 
 def InjectRandom(i, char_idx, next_char_idx):
-    print('  injecting random:')
-    print('    %s' % source_corpus[i][char_idx:next_char_idx])
     idx = random.randint(0, next_char_idx - char_idx)
     letter = source_alph[random.randint(0, len(source_alph) - 1)][0]
     source_corpus[i] = source_corpus[i][:char_idx] + letter + \
                        source_corpus[i][char_idx+1:]
-    print('    %s' % source_corpus[i][char_idx:next_char_idx])
     return 0
  
 def InjectInsert(i, char_idx, next_char_idx):
-    print('  injecting insert:')
-    print('    %s' % source_corpus[i][char_idx:next_char_idx])
     idx = random.randint(0, next_char_idx - char_idx)
     letter = source_alph[random.randint(0, len(source_alph)-1)][0]
     source_corpus[i] = source_corpus[i][:char_idx+idx] + letter + \
                        source_corpus[i][char_idx+idx:]
-    print('    %s' % source_corpus[i][char_idx:next_char_idx+1])
     return 1
    
 def InjectSplit(i, char_idx, next_char_idx):
-    print('  injecting split:')
-    print('    %s' % source_corpus[i][char_idx:next_char_idx])
     idx = random.randint(1, next_char_idx - char_idx-1)
     source_corpus[i] = source_corpus[i][:char_idx+idx] + ' ' + \
                        source_corpus[i][char_idx+idx:]
@@ -243,26 +231,18 @@ def InjectSplit(i, char_idx, next_char_idx):
     return 1
 
 def InjectDelete(i, char_idx, next_char_idx):
-    print('  injecting delete:')
-    print('    %s' % source_corpus[i][char_idx:next_char_idx])
     idx = random.randint(0, next_char_idx - char_idx)
     source_corpus[i] = source_corpus[i][:char_idx+idx] + \
                        source_corpus[i][char_idx+idx + 1:]
-    print('    %s' % source_corpus[i][char_idx:next_char_idx-1])
     return -1
 def InjectDouble(i, char_idx, next_char_idx):
-    print('  injecting double:')
-    print('    %s' % source_corpus[i][char_idx:next_char_idx])
     idx = random.randint(0, next_char_idx - char_idx - 1)
     source_corpus[i] = source_corpus[i][:char_idx+idx] + \
                        source_corpus[i][char_idx + idx] + \
                        source_corpus[i][char_idx+idx:]
-    print('    %s' % source_corpus[i][char_idx:next_char_idx+1])
     return 1
             
 print("Injecting typos")
-typo_indices = {"eval": [train_sz, train_sz + eval_sz],
-                "predict": [train_sz + eval_sz, train_sz + eval_sz + predict_sz]}
 injectFuncs = {"split":  InjectSplit,
                "swap":   InjectSwap,
                "random": InjectRandom,
@@ -270,24 +250,58 @@ injectFuncs = {"split":  InjectSplit,
                "insert": InjectInsert,
                "double": InjectDouble}
 
-for typo in hparams['inject_typos']:
-    print('  %s:' % typo)
-    if typo == "glue":
-        for stage in hparams['inject_typos'][typo]:
+def ApplyAllTypos(dic, start_idx, end_idx):
+    for typo in dic:
+        if typo == "glue":
+            print('  %s:' % typo)
             ApplyTypoInjectorPhrase(
-                 typo_indices[stage][0],
-                 typo_indices[stage][1],
+                 start_idx,
+                 end_idx,
                  InjectGlue,
-                 hparams['inject_typos'][typo][stage]/100)
-    elif typo in injectFuncs:
-        for stage in hparams['inject_typos'][typo]:
+                 dic["%"]/100.0)
+        elif typo in injectFuncs:
+            print('  %s:' % typo)
             ApplyTypoInjectorByIndex(
-                 typo_indices[stage][0],
-                 typo_indices[stage][1],
+                 start_idx,
+                 end_idx,
                  injectFuncs[typo],
-                 hparams['inject_typos'][typo][stage]/100)
-    else:
-        raise ValueError("Invalid typo type. Very funny. (%s)" % typo) 
+                 dic["%"]/100.0)
+
+evaluations = []
+eval_cum_sz = 0
+sz = len(source_corpus)
+
+for evaluation in hparams['evaluations']:
+    ev = {}
+    ev['name'] = evaluation['name']
+    ev['save_path'] = exp_path + "dg/eval_" + ev["name"]
+    ev['size'] = int(sz * evaluation["%"]/100.0)
+    eval_cum_sz += ev['size']
+    evaluations.append(ev)
+predict_pc = 0.1
+if "predict%" in hparams: 
+    predict_pc = hparams["predict%"] / 100
+predict_sz = int(sz*predict_pc)
+train_sz = sz - eval_cum_sz - predict_sz
+if train_sz < 0:
+    raise ValueError("Invalid sizes for eval and predict")
+
+eval_cum_size = 0
+ev_idx = -1
+for evaluation in hparams['evaluations']:
+    ev_idx += 1
+    evaluations[ev_idx]['start_idx'] = train_sz + eval_cum_size
+    eval_cum_size += evaluations[ev_idx]['size']
+    evaluations[ev_idx]['end_idx'] = train_sz + eval_cum_size
+    ApplyAllTypos(evaluation, evaluations[ev_idx]['start_idx'], evaluations[ev_idx]['end_idx'])
+eval_sz = eval_cum_sz
+
+corpus_info = np.array([{'sz': sz,
+    'train_sz': train_sz,
+    'eval_sz': eval_sz,
+    'predict_sz': predict_sz,
+    'evals': evaluations}])
+
 
 ######################
 ######### Encoding
@@ -318,20 +332,22 @@ for i in range(sz):
 print("  train %d (%.1f %%)" % (train_sz, train_sz / sz*100))
 train_source   = encoded_source[ : train_sz]
 train_target   = encoded_target[ : train_sz]
-
-print("  eval %d (%.1f %%)" % (eval_sz, eval_sz / sz * 100))
-eval_source    = encoded_source[train_sz : train_sz + eval_sz]
-eval_target    = encoded_target[train_sz : train_sz + eval_sz]
+for ev in evaluations:
+    print("  eval %s %d (%.1f %%)" % (ev['name'], ev['size'], ev['size'] / sz * 100))
+    ev['source'] = encoded_source[ev['start_idx']: ev['end_idx']]
+    ev['target'] = encoded_target[ev['start_idx']: ev['end_idx']]
 
 print("  predict %d (%.1f %%)" % (predict_sz, predict_sz / sz * 100))
 predict_source = encoded_source[train_sz + eval_sz : ]
 predict_target = encoded_target[train_sz + eval_sz : ]
 
 print("  storing")
+np.save (exp_path + "dg/corpus_info", corpus_info)
 np.save (exp_path + "dg/" + 'train_source', train_source)
 np.save (exp_path + "dg/" + 'train_target', train_target)
-np.save (exp_path + "dg/" + 'eval_source', eval_source)
-np.save (exp_path + "dg/" + 'eval_target', eval_target)
+for ev in evaluations:
+    np.save (ev['save_path']+'_source', ev['source'])
+    np.save (ev['save_path']+'_target', ev['target'])
 np.save (exp_path + "dg/" + 'predict_source', predict_source)
 np.save (exp_path + "dg/" + 'predict_target', predict_target)
 
