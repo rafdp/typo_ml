@@ -227,7 +227,6 @@ def InjectSplit(i, char_idx, next_char_idx):
     idx = random.randint(1, next_char_idx - char_idx-1)
     source_corpus[i] = source_corpus[i][:char_idx+idx] + ' ' + \
                        source_corpus[i][char_idx+idx:]
-    print('    %s' % source_corpus[i][char_idx:next_char_idx + 1])
     return 1
 
 def InjectDelete(i, char_idx, next_char_idx):
@@ -258,14 +257,14 @@ def ApplyAllTypos(dic, start_idx, end_idx):
                  start_idx,
                  end_idx,
                  InjectGlue,
-                 dic["%"]/100.0)
+                 dic[typo]/100.0)
         elif typo in injectFuncs:
             print('  %s:' % typo)
             ApplyTypoInjectorByIndex(
                  start_idx,
                  end_idx,
                  injectFuncs[typo],
-                 dic["%"]/100.0)
+                 dic[typo]/100.0)
 
 evaluations = []
 eval_cum_sz = 0
