@@ -23,6 +23,8 @@ target_lang = hparams["target_lang"]
 exp_path = hparams["data_path"] + experiment + '/'
 if not os.path.isdir(exp_path + 'dg'):
     os.makedirs(exp_path + 'dg')
+if not os.path.isdir(exp_path + 'predictions'):
+    os.makedirs(exp_path + 'predictions')
 
 ######################
 ######### Corpus work
@@ -267,39 +269,65 @@ def ApplyAllTypos(dic, start_idx, end_idx):
                  dic[typo]/100.0)
 
 evaluations = []
-eval_cum_sz = 0
 sz = len(source_corpus)
-
+eval_pc = 0.1
+if "eval%" in hparams: 
+    eval_pc = hparams["predict%"] / 100
+eval_sz = int(eval_pc*sz)
+eval_cum_sz = 0
 for evaluation in hparams['evaluations']:
     ev = {}
     ev['name'] = evaluation['name']
     ev['save_path'] = exp_path + "dg/eval_" + ev["name"]
-    ev['size'] = int(sz * evaluation["%"]/100.0)
-    eval_cum_sz += ev['size']
+    eval_cum_sz += eval_sz
     evaluations.append(ev)
 predict_pc = 0.1
 if "predict%" in hparams: 
     predict_pc = hparams["predict%"] / 100
 predict_sz = int(sz*predict_pc)
-train_sz = sz - eval_cum_sz - predict_sz
+train_sz = sz - eval_sz - predict_sz
 if train_sz < 0:
     raise ValueError("Invalid sizes for eval and predict")
 
 eval_cum_size = 0
 ev_idx = -1
+eval_backup_source = np.copy(source_corpus[train_sz:train_sz + eval_sz])
+eval_backup_target = np.copy(target_corpus[train_sz:train_sz + eval_sz])
 for evaluation in hparams['evaluations']:
     ev_idx += 1
+    if ev_idx > 0:
+        print("Inserting copy\n   before %d" % len(source_corpus))
+        source_corpus = np.insert(source_corpus, train_sz + eval_cum_size, eval_backup_source)
+        target_corpus = np.insert(target_corpus, train_sz + eval_cum_size, eval_backup_target)
+        print("   after %d" % len(source_corpus))
     evaluations[ev_idx]['start_idx'] = train_sz + eval_cum_size
-    eval_cum_size += evaluations[ev_idx]['size']
+    print("   start_idx %d" % (train_sz + eval_cum_size))
+    eval_cum_size += eval_sz
+    print("   end_idx %d" % (train_sz + eval_cum_size))
     evaluations[ev_idx]['end_idx'] = train_sz + eval_cum_size
     ApplyAllTypos(evaluation, evaluations[ev_idx]['start_idx'], evaluations[ev_idx]['end_idx'])
-eval_sz = eval_cum_sz
 
+sz = train_sz + predict_sz + eval_sz * len(evaluations)
+eval_target_filename = exp_path + 'predictions/true.txt'
 corpus_info = np.array([{'sz': sz,
     'train_sz': train_sz,
     'eval_sz': eval_sz,
     'predict_sz': predict_sz,
-    'evals': evaluations}])
+    'evals': evaluations,
+    'eval_target_path': eval_target_filename,
+    'output_vocab_path': output_vocab_path}])
+
+print("    corpus info")
+print(corpus_info)
+np.save (exp_path + "dg/corpus_info", corpus_info)
+
+######################
+######### Eval target (for bleu)
+######################
+eval_target_file = open(eval_target_filename, "w")
+for i in range(evaluations[0]['start_idx'], evaluations[0]['end_idx']):
+    eval_target_file.write("%s\n" % target_corpus[i])
+eval_target_file.close()
 
 
 ######################
@@ -314,39 +342,47 @@ if "max_seq_len" in hparams:
 encoded_source = np.zeros((sz, max_seq_len), dtype = int)
 for i in range(sz):
     encoded = input_encoder.encode(source_corpus[i])
-    if len(encoded) > max_seq_len:
+    if len(encoded) > max_seq_len-1:
         raise BaseException("max_seq_len must be bigger than utterance length")
     for x in range(len(encoded)):
         encoded_source[i][x] = encoded[x]
+    encoded_source[i][len(encoded)] = 1
 
 encoded_target = np.zeros((sz, max_seq_len), dtype = int)
 for i in range(sz):
     encoded = output_encoder.encode(target_corpus[i])
-    if len(encoded) > max_seq_len:
+    if len(encoded) > max_seq_len-1:
         raise BaseException("max_seq_len must be bigger than utterance length")
     for x in range(len(encoded)):
         encoded_target[i][x] = encoded[x]
+    encoded_target[i][len(encoded)] = 1
 
 
 print("  train %d (%.1f %%)" % (train_sz, train_sz / sz*100))
 train_source   = encoded_source[ : train_sz]
 train_target   = encoded_target[ : train_sz]
+print("  eval %d (%.1f %%)" % (eval_sz, eval_sz/sz*100))
 for ev in evaluations:
-    print("  eval %s %d (%.1f %%)" % (ev['name'], ev['size'], ev['size'] / sz * 100))
     ev['source'] = encoded_source[ev['start_idx']: ev['end_idx']]
     ev['target'] = encoded_target[ev['start_idx']: ev['end_idx']]
+    print("  %s (%d -- %d, sz = %d)" % (ev['name'], ev['start_idx'], ev['end_idx'], len(ev['target'])))
 
 print("  predict %d (%.1f %%)" % (predict_sz, predict_sz / sz * 100))
-predict_source = encoded_source[train_sz + eval_sz : ]
-predict_target = encoded_target[train_sz + eval_sz : ]
+predict_source = encoded_source[train_sz + eval_cum_size : ]
+predict_target = encoded_target[train_sz + eval_cum_size : ]
 
 print("  storing")
-np.save (exp_path + "dg/corpus_info", corpus_info)
+print("    train_source")
 np.save (exp_path + "dg/" + 'train_source', train_source)
+print("    train_target")
 np.save (exp_path + "dg/" + 'train_target', train_target)
 for ev in evaluations:
+    print("    %s source" % ev['name'])
     np.save (ev['save_path']+'_source', ev['source'])
+    print("    %s target" % ev['name'])
     np.save (ev['save_path']+'_target', ev['target'])
+print("    predict source")
 np.save (exp_path + "dg/" + 'predict_source', predict_source)
+print("    predict target")
 np.save (exp_path + "dg/" + 'predict_target', predict_target)
 
